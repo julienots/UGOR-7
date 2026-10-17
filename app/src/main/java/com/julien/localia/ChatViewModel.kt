@@ -3,7 +3,9 @@ package com.julien.localia
 import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.Process
 import android.os.StatFs
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
@@ -51,6 +53,7 @@ data class Settings(
 data class UiState(
     val phase: Phase = Phase.NO_MODEL,
     val status: String = "",
+    val loadStartMs: Long = 0,
     val copyProgress: Float = 0f,
     val modelName: String = "",
     val backendUsed: String = "",
@@ -222,20 +225,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadEngine() {
         viewModelScope.launch {
-            _ui.update { it.copy(phase = Phase.LOADING, status = "Chargement du modèle en mémoire…", backendUsed = "") }
+            _ui.update {
+                it.copy(
+                    phase = Phase.LOADING, status = "Chargement du modèle en mémoire…", backendUsed = "",
+                    loadStartMs = System.currentTimeMillis(),
+                )
+            }
             val wanted = _ui.value.settings.backend
-            val order = when (wanted) {
-                "GPU" -> listOf("GPU")
-                "CPU" -> listOf("CPU")
+            // Un chargement GPU précédent n'est jamais revenu (app tuée ou bloquée) : on passe direct au CPU
+            val gpuHung = prefs.getBoolean("gpuPending", false)
+            val order = when {
+                wanted == "CPU" -> listOf("CPU")
+                gpuHung -> listOf("CPU")
+                wanted == "GPU" -> listOf("GPU")
                 else -> listOf("GPU", "CPU")
             }
             val errors = mutableListOf<String>()
+            if (gpuHung) errors += "GPU : le dernier chargement ne s'est pas terminé"
+            prefs.edit().putBoolean("gpuPending", false).commit()
             var used: String? = null
             withContext(Dispatchers.IO) {
                 closeEngine()
                 for (b in order) {
                     _ui.update { it.copy(status = "Chargement du modèle ($b)… ça peut prendre 10 à 30 s") }
                     var e: Engine? = null
+                    // commit() synchrone : le drapeau doit être écrit avant un éventuel blocage natif
+                    if (b == "GPU") prefs.edit().putBoolean("gpuPending", true).commit()
                     try {
                         e = Engine(
                             EngineConfig(
@@ -252,6 +267,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         errors += "$b : ${t.message ?: t.javaClass.simpleName}"
                         try { e?.close() } catch (_: Throwable) {}
                         System.gc()
+                    } finally {
+                        if (b == "GPU") prefs.edit().putBoolean("gpuPending", false).commit()
                     }
                 }
             }
@@ -273,6 +290,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 _ui.update { it.copy(phase = Phase.ERROR, status = "Erreur conversation : ${t.message}") }
             }
         }
+    }
+
+    /**
+     * L'init native du moteur ne peut pas être interrompue : on enregistre le choix CPU
+     * puis on redémarre le processus de l'app.
+     */
+    fun restartOnCpu() {
+        prefs.edit()
+            .putString("backend", "CPU")
+            .putBoolean("gpuPending", false)
+            .commit()
+        val intent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
+        intent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        if (intent != null) ctx.startActivity(intent)
+        Process.killProcess(Process.myPid())
     }
 
     private fun createConversation() {

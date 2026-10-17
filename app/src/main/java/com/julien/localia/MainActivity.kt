@@ -116,7 +116,7 @@ fun App(vm: ChatViewModel = viewModel()) {
         ) {
             when (st.phase) {
                 Phase.NO_MODEL -> WelcomeScreen(st, pick)
-                Phase.COPYING, Phase.LOADING -> LoadingScreen(st)
+                Phase.COPYING, Phase.LOADING -> LoadingScreen(st, onCpu = vm::restartOnCpu)
                 Phase.ERROR -> ErrorScreen(st, onRetry = { vm.loadEngine() }, onPick = pick,
                     onCpu = { vm.applySettings(st.settings.copy(backend = "CPU")); vm.loadEngine() })
                 Phase.READY -> ChatScreen(st, onSend = vm::send, onStop = vm::stop)
@@ -184,7 +184,16 @@ private fun WelcomeScreen(st: UiState, onPick: () -> Unit) {
 }
 
 @Composable
-private fun LoadingScreen(st: UiState) {
+private fun LoadingScreen(st: UiState, onCpu: () -> Unit) {
+    var elapsed by remember(st.loadStartMs) { mutableLongStateOf(0L) }
+    if (st.phase == Phase.LOADING) {
+        LaunchedEffect(st.loadStartMs) {
+            while (true) {
+                elapsed = (System.currentTimeMillis() - st.loadStartMs) / 1000
+                delay(1000)
+            }
+        }
+    }
     Column(
         Modifier.fillMaxSize().padding(32.dp),
         verticalArrangement = Arrangement.Center,
@@ -204,6 +213,19 @@ private fun LoadingScreen(st: UiState) {
         if (st.modelName.isNotBlank()) {
             Spacer(Modifier.height(6.dp))
             Text(st.modelName, color = TextDim, fontSize = 13.sp)
+        }
+        if (st.phase == Phase.LOADING && st.loadStartMs > 0) {
+            Spacer(Modifier.height(6.dp))
+            Text("${elapsed} s", color = TextDim, fontSize = 13.sp)
+            if (elapsed >= 40 && st.settings.backend != "CPU") {
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    "Le GPU semble bloqué. L'app va redémarrer et charger le modèle sur le CPU.",
+                    color = TextDim, fontSize = 13.sp, textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = onCpu, modifier = Modifier.fillMaxWidth()) { Text("Redémarrer en CPU") }
+            }
         }
     }
 }
